@@ -1,0 +1,124 @@
+
+name: KZ WINDOWS PC - FULL POWER
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kz-pc:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+
+      - name: 1 - Preparar Windows
+        shell: powershell
+        run: |
+          Write-Host "Iniciando KZ WINDOWS PC"
+
+          # Informações do computador
+          Get-ComputerInfo |
+            Select-Object WindowsProductName,
+            WindowsVersion, CsNumberOfLogicalProcessors,
+            CsTotalPhysicalMemory
+
+          # Plano de energia de alto desempenho
+          powercfg /setactive SCHEME_MIN
+
+          # Habilitar área de trabalho remota
+          Set-ItemProperty `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+            -Name "fDenyTSConnections" -Value 0
+
+          # Exigir autenticação de nível de rede
+          Set-ItemProperty `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+            -Name "UserAuthentication" -Value 1
+
+      - name: 2 - Criar usuário e senha
+        shell: powershell
+        run: |
+          $username = "kzremote"
+
+          $bytes = New-Object byte[] 32
+          $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+          $rng.GetBytes($bytes)
+
+          $password = [Convert]::ToBase64String($bytes)
+          $password = $password.Substring(0, 24) + "aA1!"
+
+          $securePassword = ConvertTo-SecureString `
+            $password -AsPlainText -Force
+
+          if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
+            Set-LocalUser -Name $username -Password $securePassword
+          } else {
+            New-LocalUser `
+              -Name $username `
+              -Password $securePassword `
+              -PasswordNeverExpires
+          }
+
+          Add-LocalGroupMember `
+            -Group "Remote Desktop Users" `
+            -Member $username `
+            -ErrorAction SilentlyContinue
+
+          "KZ_USER=$username" >> $env:GITHUB_ENV
+          "KZ_PASSWORD=$password" >> $env:GITHUB_ENV
+
+      - name: 3 - Conectar Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+
+      - name: 4 - Liberar RDP somente pela rede Tailscale
+        shell: powershell
+        run: |
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+          New-NetFirewallRule `
+            -DisplayName "KZ RDP Tailscale Only" `
+            -Direction Inbound `
+            -Protocol TCP `
+            -LocalPort 3389 `
+            -RemoteAddress 100.64.0.0/10 `
+            -Action Allow
+
+          tailscale status
+
+      - name: 5 - Gerar dados de acesso
+        shell: powershell
+        run: |
+          $ip = tailscale ip -4
+
+          $summary = @"
+          # KZ WINDOWS PC
+
+          Status: INICIADO
+
+          IP TAILSCALE: $ip
+          PORTA: 3389
+          USUÁRIO: $env:KZ_USER
+          SENHA: $env:KZ_PASSWORD
+
+          Aplicativo: Windows App
+          Protocolo: RDP
+          "@
+
+          $summary | Out-File `
+            -FilePath $env:GITHUB_STEP_SUMMARY `
+            -Encoding utf8
+
+          Write-Host "KZ WINDOWS PC CONECTADO"
+          Write-Host "IP: $ip"
+          
